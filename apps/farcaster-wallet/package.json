@@ -1,0 +1,27 @@
+{
+  "name": "farcaster-wallet",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node build.mjs --serve",
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@scure/bip39": "2.3.0",
+    "@solana/web3.js": "1.98.4",
+    "bs58": "6.0.0",
+    "ed25519-hd-key": "2.0.0",
+    "esbuild": "0.28.2",
+    "ethers": "6.17.0",
+    "tweetnacl": "1.0.3",
+    "typescript": "7.0.2"
+  },
+  "private": true,
+  "type": "module"
+}

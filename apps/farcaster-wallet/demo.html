@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wallet test harness</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
+    #left { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #ccc; }
+    #wallet-frame { flex: 1; border: none; }
+    #right { width: 340px; padding: 12px; overflow-y: auto; box-sizing: border-box; }
+    button { display: block; width: 100%; margin-bottom: 8px; padding: 8px; }
+    #actions { display: none; }
+    #log { font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    #log div { padding: 4px 0; border-bottom: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div id="left">
+    <iframe id="wallet-frame"></iframe>
+  </div>
+  <div id="right">
+    <h3>Wallet test harness</h3>
+    <p style="font-size:13px;color:#555">Plays the parent's side of the protocol. Not part of the shipped wallet.</p>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px">
+      <input type="checkbox" id="cluster-devnet">
+      Load wallet on Solana devnet (only for the self-transfer test below — leave unchecked for the Jupiter swap test, which needs mainnet)
+    </label>
+    <button id="btn-load">1. Load wallet &amp; transfer ports</button>
+    <div id="actions">
+      <button id="btn-chainid">eth_chainId</button>
+      <button id="btn-accounts">eth_accounts</button>
+      <button id="btn-request-accounts">eth_requestAccounts</button>
+      <button id="btn-sign">personal_sign</button>
+      <button id="btn-sol-connect">solana connect</button>
+      <button id="btn-sol-sign-message">solana signMessage</button>
+      <button id="btn-sol-send" style="background:#fff3cd">Solana: sign & send 0-lamport self-transfer (devnet)</button>
+      <button id="btn-send-token">send_token (opens wallet UI)</button>
+      <button id="btn-swap" style="background:#fff3cd">swap_token: 0.001 ETH → USDC on Base (real quote + real broadcast)</button>
+      <button id="btn-swap-solana" style="background:#fff3cd">swap_token: 0.001 SOL → USDC (Solana mainnet, real quote + real broadcast)</button>
+      <button id="btn-signin">sign_in_with_auth_address (real SIWE signature, no cost)</button>
+      <button id="btn-sign-manifest">silently_sign_manifest (real JFS, no approval UI, no cost)</button>
+      <button id="btn-sign-auth-message">silently_sign_auth_message (real JFS, no approval UI, no cost)</button>
+      <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+      <button id="btn-switch-testnet">Switch to Base Sepolia (testnet)</button>
+      <button id="btn-send-tx" style="background:#fff3cd">Send 0 ETH to self (real broadcast — switch to testnet first)</button>
+    </div>
+    <h4>Log</h4>
+    <div id="log"></div>
+  </div>
+  <script type="module" src="/demo/harness.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- default-src 'none' + script-src 'self': nothing loads here except this
+       origin's own bundle. An origin holding private keys should not be able
+       to have "what signs your transactions" changed by a CDN outage or
+       compromise. Set the equivalent header at the server/CDN too — a meta
+       tag alone doesn't cover everything (e.g. it can't set frame-ancestors),
+       so this is a floor, not the whole policy. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; img-src 'self' data: https:;" />
+  <title>Farcaster Wallet</title>
+</head>
+<body>
+  <div id="app" style="white-space: pre-line">Loading…</div>
+  <script type="module" src="/index.js"></script>
+</body>
+</html>
