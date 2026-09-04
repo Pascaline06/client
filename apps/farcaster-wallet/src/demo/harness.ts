@@ -152,7 +152,13 @@ function wireButtons() {
   document.getElementById('btn-send-token')!.addEventListener('click', () =>
     call('send_token (walletProvider)', () =>
       bridge!.walletProviderClient.request('send_token', {
-        sendIntent: { chain: 'base', ca: 'eth', amount: '0.001' },
+        sendIntent: {
+          // Current Farcaster Mini Apps SendTokenOptions: CAIP-19 asset id,
+          // raw base-unit amount, and recipientAddress.
+          token: 'eip155:8453/native',
+          amount: '1000000000000000', // 0.001 ETH in wei
+          recipientAddress: '0x000000000000000000000000000000000000dEaD',
+        },
       }),
     ),
   );
@@ -210,10 +216,10 @@ function wireButtons() {
     call('swap_token (walletProvider) — 0.001 ETH -> USDC on Base', () =>
       bridge!.walletProviderClient.request('swap_token', {
         swapIntent: {
-          sellChainId: 8453,
-          buyChainId: 8453,
-          sellToken: '0x0000000000000000000000000000000000000000', // native ETH
-          buyToken: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // USDC on Base
+          // Current Farcaster Mini Apps SwapTokenOptions uses CAIP-19 IDs
+          // and a raw base-unit sellAmount.
+          sellToken: 'eip155:8453/native',
+          buyToken: 'eip155:8453/erc20:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
           sellAmount: '1000000000000000', // 0.001 ETH in wei
         },
       }),

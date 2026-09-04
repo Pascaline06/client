@@ -184,12 +184,15 @@ known-correct value — rather than trusted on the strength of "it typechecks" o
   for a swap has been deliberately not taken all the way through in testing, since doing so spends
   real money — the broadcast primitive itself is the same one already proven correct by the plain
   send-transaction tests on both chains.
-- **A few wire-format shapes are unverified guesses**, flagged explicitly in code comments where
-  they occur: `swapIntent`'s exact field names (a search for Farcaster's actual mini app SDK schema
-  for this came up empty), the exact envelope shapes of `swap_token_result` and `eth_provider_event`
-  sent back to the parent, and the payload shape `silently_sign_auth_message` expects. Each of these
-  fails with a specific, readable error if the real shape doesn't match, rather than silently
-  guessing wrong.
+- **Token-action wire formats are now aligned to the current Farcaster Mini Apps core types.**
+  `send_token` accepts the documented CAIP-19 `token`, raw base-unit `amount`, and
+  `recipientAddress`; `swap_token` accepts documented CAIP-19 `sellToken`/`buyToken` plus raw
+  `sellAmount`. Their result envelopes also match the current `SendTokenResult` and
+  `SwapTokenResult` success/error shapes, including ordered approval + swap transaction hashes.
+  The wallet still retains compatibility parsing for this snapshot's older demo/bridge callers.
+- **Two parent/internal bridge details remain explicitly unverified:** the exact parameter envelope
+  for `eth_provider_event`, and the payload shape expected by `silently_sign_auth_message`. Those
+  paths are kept isolated and fail visibly rather than being presented as verified Mini Apps API.
 - **`silently_sign_manifest` / `silently_sign_auth_message` require zero user confirmation** — no
   approval sheet, no unlock prompt. That appears to be genuine protocol design (the method name says
   "silently," and there's no matching `_result` callback method the way every other flow in this

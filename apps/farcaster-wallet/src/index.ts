@@ -174,6 +174,52 @@ function renderStandalone() {
   const root = document.getElementById('app')!;
   root.textContent = 'Opened outside a parent frame. Standalone/demo UI not yet built.';
 }
+type Caip19EvmAsset = {
+  chainId: number;
+  tokenAddress?: string;
+  native: boolean;
+};
+
+/** Parse the EVM CAIP-19 asset IDs used by Farcaster Mini Apps.
+ * Examples:
+ *   eip155:8453/native
+ *   eip155:8453/erc20:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+ */
+function parseEvmCaip19(assetId: string | undefined): Caip19EvmAsset | null {
+  if (!assetId) return null;
+  const match = /^eip155:(\d+)\/(native|erc20:(0x[a-fA-F0-9]{40}))$/.exec(assetId.trim());
+  if (!match) return null;
+  const chainId = Number(match[1]);
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) return null;
+  return match[2] === 'native'
+    ? { chainId, native: true }
+    : { chainId, native: false, tokenAddress: match[3] };
+}
+
+function sendRejectedResult() {
+  return { success: false, reason: 'rejected_by_user' as const };
+}
+
+function sendFailedResult(message: string) {
+  return {
+    success: false,
+    reason: 'send_failed' as const,
+    error: { error: 'SEND_FAILED', message },
+  };
+}
+
+function swapRejectedResult() {
+  return { success: false, reason: 'rejected_by_user' as const };
+}
+
+function swapFailedResult(message: string) {
+  return {
+    success: false,
+    reason: 'swap_failed' as const,
+    error: { error: 'SWAP_FAILED', message },
+  };
+}
+
 async function runSendFlow(
   rawIntent: Record<string, unknown> | undefined,
   bridge: WalletBridge,
@@ -183,22 +229,34 @@ async function runSendFlow(
     if (!isUnlocked()) {
       const unlocked = await requestApproval({ kind: 'unlock' });
       if (!unlocked) {
-        await bridge.warpcast.request('send_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+        await bridge.warpcast.request('send_token_result', sendRejectedResult()).catch(() => {});
         return;
       }
       renderHome();
     }
     if (!rawIntent) throw new Error('send_token called with no sendIntent.');
 
-    const recipient = String(rawIntent.recipient ?? rawIntent.to ?? rawIntent.address ?? '');
+    // Current Farcaster Mini Apps SendTokenOptions:
+    // { token?: CAIP-19, amount?: raw integer string, recipientAddress?: string, recipientFid?: number }
+    // Keep the older aliases as a compatibility fallback for the snapshot bridge/harness.
+    const recipient = String(rawIntent.recipientAddress ?? rawIntent.recipient ?? rawIntent.to ?? rawIntent.address ?? '');
     const amount = String(rawIntent.amount ?? rawIntent.sendAmount ?? rawIntent.value ?? '');
-    const token = rawIntent.tokenAddress ?? rawIntent.token ?? rawIntent.contractAddress;
-    const chainId = Number(rawIntent.chainId ?? rawIntent.networkId ?? rawIntent.sellChainId ?? 0);
+    const officialAsset = parseEvmCaip19(typeof rawIntent.token === 'string' ? rawIntent.token : undefined);
+    const legacyToken = rawIntent.tokenAddress ?? rawIntent.contractAddress;
+    const chainId = officialAsset?.chainId ?? Number(rawIntent.chainId ?? rawIntent.networkId ?? rawIntent.sellChainId ?? 0);
+    const token = officialAsset ? (officialAsset.native ? undefined : officialAsset.tokenAddress) : legacyToken;
     const network = String(rawIntent.network ?? rawIntent.chain ?? '').toLowerCase();
-    const isSolana = network.includes('solana') || network === 'svm' || rawIntent.chain === 'solana';
-    const amountIsRaw = rawIntent.amountIsRaw === true || rawIntent.rawAmount === true;
-    if (!recipient || !amount) throw new Error(`sendIntent shape not recognized — got keys [${Object.keys(rawIntent).join(', ')}].`);
-    if (!isSolana && chainId && !getChainConfig(chainId)) throw new Error(`Unsupported EVM chain ${chainId}.`);
+    const isSolana = !officialAsset && (network.includes('solana') || network === 'svm' || rawIntent.chain === 'solana');
+    // Farcaster's documented `amount` is already the token's raw base-unit amount.
+    const amountIsRaw = officialAsset ? true : (rawIntent.amountIsRaw === true || rawIntent.rawAmount === true);
+
+    if (!recipient || !amount) {
+      throw new Error(`sendIntent shape not recognized — got keys [${Object.keys(rawIntent).join(', ')}].`);
+    }
+    if (!isSolana && !chainId) {
+      throw new Error('send_token requires a CAIP-19 token or an explicit EVM chainId.');
+    }
+    if (!isSolana && !getChainConfig(chainId)) throw new Error(`Unsupported EVM chain ${chainId}.`);
 
     const approved = await requestApproval({
       kind: 'transaction',
@@ -206,30 +264,31 @@ async function runSendFlow(
       origin: getOrigin(),
     });
     if (!approved) {
-      await bridge.warpcast.request('send_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+      await bridge.warpcast.request('send_token_result', sendRejectedResult()).catch(() => {});
       return;
     }
 
     const txHash = isSolana
       ? await sendSolanaNative(recipient, amount, amountIsRaw)
-      : await sendEvmToken({ to: recipient, token: token ? String(token) : undefined, amount, amountIsRaw, chainId: chainId || undefined });
-    await bridge.warpcast.request('send_token_result', { success: true, txHash }).catch(() => {});
+      : await sendEvmToken({
+          to: recipient,
+          token: token ? String(token) : undefined,
+          amount,
+          amountIsRaw,
+          chainId,
+        });
+
+    // Farcaster Mini Apps SendTokenResult success shape:
+    // { success: true, send: { transaction: `0x${string}` } }
+    await bridge.warpcast.request('send_token_result', { success: true, send: { transaction: txHash } }).catch(() => {});
     renderHome();
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error('Send failed:', message);
-    await bridge.warpcast.request('send_token_result', { success: false, reason: 'error', error: message }).catch(() => {});
+    await bridge.warpcast.request('send_token_result', sendFailedResult(message)).catch(() => {});
   }
 }
 
-/**
- * swapIntent's real field names haven't been confirmed against a live
- * Farcaster mini app SDK call — a search for the actual schema came up
- * empty. This accepts a couple of plausible key-name variants and throws a
- * specific, readable error if none match, rather than silently defaulting
- * to values that would swap the wrong token or amount. Update this against
- * whatever a real intent object actually looks like once one's been seen.
- */
 function parseSwapIntent(intent: Record<string, unknown> | undefined): {
   fromChainId: number;
   toChainId: number;
@@ -238,6 +297,22 @@ function parseSwapIntent(intent: Record<string, unknown> | undefined): {
   fromAmount: string;
 } {
   if (!intent) throw new Error('swap_token called with no swapIntent.');
+
+  // Current Farcaster Mini Apps SwapTokenOptions uses CAIP-19 IDs in
+  // sellToken/buyToken and a raw sellAmount string.
+  const officialSell = parseEvmCaip19(typeof intent.sellToken === 'string' ? intent.sellToken : undefined);
+  const officialBuy = parseEvmCaip19(typeof intent.buyToken === 'string' ? intent.buyToken : undefined);
+  if (officialSell && officialBuy && intent.sellAmount != null) {
+    return {
+      fromChainId: officialSell.chainId,
+      toChainId: officialBuy.chainId,
+      fromToken: officialSell.native ? NATIVE_TOKEN_ADDRESS : officialSell.tokenAddress!,
+      toToken: officialBuy.native ? NATIVE_TOKEN_ADDRESS : officialBuy.tokenAddress!,
+      fromAmount: String(intent.sellAmount),
+    };
+  }
+
+  // Compatibility with the older snapshot harness / pre-CAIP intent shape.
   const fromChainId = Number(intent.sellChainId ?? intent.fromChainId ?? intent.chainId);
   const toChainId = Number(intent.buyChainId ?? intent.toChainId ?? intent.chainId);
   const fromToken = String(intent.sellToken ?? intent.fromToken ?? '');
@@ -245,7 +320,7 @@ function parseSwapIntent(intent: Record<string, unknown> | undefined): {
   const fromAmount = String(intent.sellAmount ?? intent.fromAmount ?? '');
   if (!fromChainId || !toChainId || !fromToken || !toToken || !fromAmount) {
     throw new Error(
-      `swapIntent shape not recognized — got keys [${Object.keys(intent).join(', ')}], none matched the expected sellToken/buyToken/sellAmount or fromToken/toToken/fromAmount patterns. This needs updating against a real intent object.`,
+      `swapIntent shape not recognized — got keys [${Object.keys(intent).join(', ')}]. Expected Farcaster CAIP-19 sellToken/buyToken/sellAmount.`,
     );
   }
   return { fromChainId, toChainId, fromToken, toToken, fromAmount };
@@ -257,22 +332,22 @@ async function runSwapFlow(
   getOrigin: () => string,
 ) {
   try {
-    // Gate on unlock FIRST — otherwise this fetches a real quote, shows a
-    // real approval sheet, and only discovers the wallet was locked after
-    // the person already tapped approve, which is a worse failure than
-    // just asking for the password up front like every other flow does.
     if (!isUnlocked()) {
       const unlocked = await requestApproval({ kind: 'unlock' });
       if (!unlocked) {
-        await bridge.warpcast.request('swap_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+        await bridge.warpcast.request('swap_token_result', swapRejectedResult()).catch(() => {});
         return;
       }
       renderHome();
     }
 
     const intent = parseSwapIntent(rawIntent);
+    if (!getChainConfig(intent.fromChainId)) throw new Error(`Unsupported EVM source chain ${intent.fromChainId}.`);
+    if (!getChainConfig(intent.toChainId)) throw new Error(`Unsupported EVM destination chain ${intent.toChainId}.`);
+
     const isNative = intent.fromToken.toLowerCase() === NATIVE_TOKEN_ADDRESS || intent.fromToken.toLowerCase() === 'native';
     const fromTokenAddress = isNative ? NATIVE_TOKEN_ADDRESS : intent.fromToken;
+    const transactions: string[] = [];
 
     const address = getEvmAddress();
     if (!address) throw new Error('No EVM account available to quote from.');
@@ -286,10 +361,6 @@ async function runSwapFlow(
       fromAddress: address,
     });
 
-    // Non-native tokens need an on-chain allowance before LI.FI's contract
-    // can move them. Check first — an already-sufficient allowance from a
-    // prior swap shouldn't cost the person a second approval transaction
-    // and a second gas fee for no reason.
     if (!isNative) {
       const spender = quote.estimate.approvalAddress;
       const needed = BigInt(quote.estimate.fromAmount);
@@ -303,19 +374,18 @@ async function runSwapFlow(
           origin: getOrigin(),
         });
         if (!approvedAllowance) {
-          await bridge.warpcast.request('swap_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+          await bridge.warpcast.request('swap_token_result', swapRejectedResult()).catch(() => {});
           return;
         }
         const approveData = await buildErc20ApproveCalldata(spender, needed);
-        // Waits for confirmation on purpose — submitting the swap before
-        // this is actually mined would just fail on-chain.
-        await broadcastPreparedTransaction({
+        const approvalHash = await broadcastPreparedTransaction({
           to: fromTokenAddress,
           data: approveData,
           value: '0x0',
           chainId: intent.fromChainId,
           waitForConfirmation: true,
         });
+        transactions.push(approvalHash);
       }
     }
 
@@ -333,7 +403,7 @@ async function runSwapFlow(
     });
 
     if (!approved) {
-      await bridge.warpcast.request('swap_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+      await bridge.warpcast.request('swap_token_result', swapRejectedResult()).catch(() => {});
       return;
     }
 
@@ -346,29 +416,25 @@ async function runSwapFlow(
       gasPrice: quote.transactionRequest.gasPrice,
       waitForConfirmation: true,
     });
+    transactions.push(txHash);
 
-    // Wire format of swap_token_result is the same kind of unverified
-    // assumption as swapIntent above — this is a reasonable guess at the
-    // shape, not a confirmed one.
-    await bridge.warpcast.request('swap_token_result', { success: true, txHash }).catch(() => {});
+    // Farcaster Mini Apps SwapTokenResult success shape:
+    // { success: true, swap: { transactions: [`0x...`, ...] } }
+    await bridge.warpcast.request('swap_token_result', { success: true, swap: { transactions } }).catch(() => {});
     renderHome();
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error('Swap failed:', message);
-    await bridge.warpcast
-      .request('swap_token_result', { success: false, reason: 'error', error: message })
-      .catch(() => {});
+    await bridge.warpcast.request('swap_token_result', swapFailedResult(message)).catch(() => {});
   }
 }
 
 /**
- * Detects a Solana-targeted swapIntent and returns its parsed fields, or
- * null if this doesn't look like one — same defensive, unverified-schema
- * situation as parseSwapIntent above, compounded by not even knowing what
- * field would distinguish a Solana intent from an EVM one. Guesses at a
- * chain/network hint field containing "solana" or "svm"; falls through to
- * the EVM parser otherwise, which will produce its own clear error if
- * neither shape matches.
+ * Compatibility path for the wallet snapshot's Solana-specific swap intent.
+ * The current public Farcaster actions.swapToken schema documents CAIP-19 EVM
+ * assets and 0x transaction identifiers, so official Mini App swap requests
+ * take the EVM parser above. This path remains for the existing wallet bridge
+ * harness/legacy callers that explicitly label a Solana/SVM intent.
  */
 function parseSolanaSwapIntent(
   intent: Record<string, unknown> | undefined,
@@ -393,7 +459,7 @@ async function runSolanaSwapFlow(
     if (!isUnlocked()) {
       const unlocked = await requestApproval({ kind: 'unlock' });
       if (!unlocked) {
-        await bridge.warpcast.request('swap_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+        await bridge.warpcast.request('swap_token_result', swapRejectedResult()).catch(() => {});
         return;
       }
       renderHome();
@@ -424,21 +490,21 @@ async function runSolanaSwapFlow(
       origin: getOrigin(),
     });
     if (!approved) {
-      await bridge.warpcast.request('swap_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+      await bridge.warpcast.request('swap_token_result', swapRejectedResult()).catch(() => {});
       return;
     }
 
     const swapTransaction = await getSolanaSwapTransaction({ quote, userPublicKey: address });
     const signature = await signAndBroadcastSerializedTransaction(swapTransaction);
 
-    await bridge.warpcast.request('swap_token_result', { success: true, txHash: signature }).catch(() => {});
+    // Legacy bridge compatibility: Solana signatures are base58, not the 0x
+    // identifiers required by the current public SwapTokenResult type.
+    await bridge.warpcast.request('swap_token_result', { success: true, swap: { transactions: [signature] } }).catch(() => {});
     renderHome();
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error('Solana swap failed:', message);
-    await bridge.warpcast
-      .request('swap_token_result', { success: false, reason: 'error', error: message })
-      .catch(() => {});
+    await bridge.warpcast.request('swap_token_result', swapFailedResult(message)).catch(() => {});
   }
 }
 
