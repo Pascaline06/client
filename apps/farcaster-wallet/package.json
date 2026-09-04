@@ -6,11 +6,12 @@
   "scripts": {
     "start": "node build.mjs --serve",
     "build": "node build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke-check.mjs"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@noble/hashes": "2.4.0",
     "@scure/bip39": "2.3.0",
@@ -19,9 +20,11 @@
     "ed25519-hd-key": "2.0.0",
     "esbuild": "0.28.2",
     "ethers": "6.17.0",
-    "tweetnacl": "1.0.3",
-    "typescript": "7.0.2"
+    "tweetnacl": "1.0.3"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
 }

@@ -4,7 +4,7 @@
 [`farcasterxyz/client`](https://github.com/farcasterxyz/client) ships `apps/farcaster-web` with a
 fully-built bridge for an embedded wallet — `EmbeddedWallet.tsx` opens an iframe, hands it four
 `MessagePort`s, and waits for something to answer on the other side — but no wallet exists to answer
-it. **This is that wallet.** It lives at `apps/farcaster-wallet` in this fork and implements every
+it. **This is that wallet implementation.** It lives at `apps/farcaster-wallet` in this fork and implements every
 side of the bridge: Ethereum and Solana, real transaction signing, real swaps, and real Farcaster
 identity signing, license kept as the same MIT the upstream repo already uses.
 
@@ -14,7 +14,7 @@ asserted on the strength of "it should work."
 
 ## At a glance
 
-| | EVM (Base, Base Sepolia, Ethereum, Optimism, Arbitrum) | Solana |
+| | EVM (Base, Base Sepolia, Ethereum, Optimism, Arbitrum, Polygon, Zora, Degen, Monad, Robinhood Chain) | Solana |
 |---|---|---|
 | **View** (address, balance) | ✅ live-verified | ✅ live-verified |
 | **Send** (native transfer, arbitrary tx) | ✅ live-verified, real broadcast confirmed on-chain | ✅ live-verified, real broadcast confirmed on-chain |
@@ -118,8 +118,7 @@ Full EIP-1193 surface: `eth_chainId`, `eth_accounts`, `eth_requestAccounts`, `pe
 a real gap that sat open for a while, since a mini app listening for that standard event would
 otherwise never find out a switch succeeded), `wallet_getCapabilities` (honestly returns `{}` — this
 is a plain EOA, not a smart account, and says so rather than implying paymaster/batching support it
-doesn't have), and `eth_getBalance`. Real public RPC endpoints for Base, Base Sepolia, Ethereum,
-Optimism, and Arbitrum in `src/providers/chains.ts`.
+doesn't have), and `eth_getBalance`. Real public RPC endpoints for Base, Base Sepolia, Ethereum, Optimism, Arbitrum, Polygon, Zora, Degen, Monad, and Robinhood Chain in `src/providers/chains.ts`.
 
 ### Solana provider (`src/providers/solanaProvider.ts`)
 

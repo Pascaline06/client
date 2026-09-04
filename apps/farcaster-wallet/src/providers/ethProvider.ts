@@ -81,6 +81,40 @@ export function getCurrentChainName(): string {
   return getChainConfig(currentChainId)?.name ?? `Chain ${currentChainId}`;
 }
 
+export function getCurrentChainNativeSymbol(): string {
+  return getChainConfig(currentChainId)?.nativeSymbol ?? 'ETH';
+}
+
+export async function sendEvmToken(params: {
+  to: string;
+  token?: string;
+  amount: string;
+  amountIsRaw?: boolean;
+  chainId?: number;
+}): Promise<string> {
+  const targetChainId = params.chainId ?? currentChainId;
+  const wallet = requireUnlockedEvm().connect(providerFor(targetChainId));
+  const { getAddress, isAddress, parseUnits, parseEther, Interface } = await import('ethers');
+  if (!isAddress(params.to)) throw new RpcError(ERR_INVALID_PARAMS, 'Invalid recipient address.');
+
+  const token = params.token?.trim();
+  const isNative = !token || token === '0x0000000000000000000000000000000000000000';
+  if (isNative) {
+    const value = params.amountIsRaw ? BigInt(params.amount) : parseEther(params.amount);
+    const sent = await wallet.sendTransaction({ to: getAddress(params.to), value });
+    return sent.hash;
+  }
+
+  if (!isAddress(token)) throw new RpcError(ERR_INVALID_PARAMS, 'Invalid token address.');
+  const decimalsIface = new Interface(['function decimals() view returns (uint8)', 'function transfer(address to, uint256 amount) returns (bool)']);
+  const decimalsResult = await providerFor(targetChainId).call({ to: token, data: decimalsIface.encodeFunctionData('decimals') });
+  const decimals = Number(decimalsIface.decodeFunctionResult('decimals', decimalsResult)[0]);
+  const value = params.amountIsRaw ? BigInt(params.amount) : parseUnits(params.amount, decimals);
+  const data = decimalsIface.encodeFunctionData('transfer', [getAddress(params.to), value]);
+  const sent = await wallet.sendTransaction({ to: getAddress(token), data, value: 0n });
+  return sent.hash;
+}
+
 /** For callers that already have their own approval step (the swap flow)
  * and just need to sign-and-broadcast an already-built transaction, without
  * going through eth_sendTransaction's own approval gate a second time. */
@@ -122,6 +156,46 @@ export async function handleEthProviderRequest(method: string, params: unknown):
     case 'eth_chainId':
       return `0x${currentChainId.toString(16)}`;
 
+    case 'eth_blockNumber':
+      return `0x${(await providerFor(currentChainId).getBlockNumber()).toString(16)}`;
+
+    case 'eth_getCode': {
+      const [address, blockTag] = params as [string, string?];
+      return providerFor(currentChainId).getCode(address, blockTag ?? 'latest');
+    }
+
+    case 'eth_getTransactionByHash': {
+      const [hash] = params as [string];
+      return providerFor(currentChainId).getTransaction(hash);
+    }
+
+    case 'eth_getTransactionReceipt': {
+      const [hash] = params as [string];
+      return providerFor(currentChainId).getTransactionReceipt(hash);
+    }
+
+    // Read-only JSON-RPC methods commonly used by viem/ethers/wagmi-based
+    // Farcaster mini apps. Send these through ethers' raw RPC layer so the
+    // wire result stays in JSON-RPC hex/object form instead of depending on
+    // ethers' higher-level object serialization.
+    case 'eth_call':
+    case 'eth_estimateGas':
+    case 'eth_getTransactionCount':
+    case 'eth_gasPrice':
+    case 'eth_maxPriorityFeePerGas':
+    case 'eth_feeHistory':
+    case 'eth_getBlockByNumber':
+    case 'eth_getBlockByHash':
+      return providerFor(currentChainId).send(method, (params as unknown[]) ?? []);
+
+    case 'wallet_addEthereumChain': {
+      const requested = (params as [{ chainId?: string }?])[0];
+      if (!requested?.chainId) throw new RpcError(ERR_INVALID_PARAMS, 'wallet_addEthereumChain requires chainId.');
+      const id = parseInt(requested.chainId, 16);
+      if (!getChainConfig(id)) throw new RpcError(ERR_INVALID_PARAMS, `Chain ${requested.chainId} is not configured in this wallet.`);
+      return null;
+    }
+
     case 'eth_accounts': {
       if (!isUnlocked()) return [];
       return [requireUnlockedEvm().address];
@@ -138,7 +212,10 @@ export async function handleEthProviderRequest(method: string, params: unknown):
     }
 
     case 'wallet_switchEthereumChain': {
-      const { chainId } = params as { chainId: string };
+      const [{ chainId }] = params as [{ chainId: string }];
+      if (typeof chainId !== 'string' || !/^0x[0-9a-f]+$/i.test(chainId)) {
+        throw new RpcError(ERR_INVALID_PARAMS, 'wallet_switchEthereumChain requires a hexadecimal chainId.');
+      }
       const id = parseInt(chainId, 16);
       if (!getChainConfig(id)) {
         throw new RpcError(4902, `Unrecognized chain ${chainId}`); // EIP-3085 "unrecognized chain" code
@@ -163,28 +240,36 @@ export async function handleEthProviderRequest(method: string, params: unknown):
 
     case 'personal_sign': {
       const [messageHex, address] = params as [string, string];
+      const wallet = requireUnlockedEvm();
+      if (address?.toLowerCase() !== wallet.address.toLowerCase()) throw new RpcError(ERR_INVALID_PARAMS, 'Signing account does not match the wallet account.');
       const approved = await requestApproval({ kind: 'sign', method, raw: messageHex, origin: currentOrigin() });
       if (!approved) throw new RpcError(ERR_USER_REJECTED, 'User rejected the signature request.');
-      const wallet = requireUnlockedEvm();
       return wallet.signMessage(hexToBytes(messageHex));
     }
 
     case 'eth_signTypedData_v4': {
       const [address, typedDataJson] = params as [string, string];
+      const wallet = requireUnlockedEvm();
+      if (address?.toLowerCase() !== wallet.address.toLowerCase()) throw new RpcError(ERR_INVALID_PARAMS, 'Signing account does not match the wallet account.');
       const approved = await requestApproval({ kind: 'sign', method, raw: typedDataJson, origin: currentOrigin() });
       if (!approved) throw new RpcError(ERR_USER_REJECTED, 'User rejected the signature request.');
-      const wallet = requireUnlockedEvm();
       const typedData = JSON.parse(typedDataJson);
       return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
     }
 
     case 'eth_sendTransaction': {
       const [tx] = params as [Record<string, unknown>];
+      if (!tx || typeof tx !== 'object') throw new RpcError(ERR_INVALID_PARAMS, 'eth_sendTransaction requires a transaction object.');
+      const requestedChainId = tx.chainId == null ? currentChainId : Number(tx.chainId);
+      if (!Number.isInteger(requestedChainId) || !getChainConfig(requestedChainId)) {
+        throw new RpcError(4902, `Unrecognized chain ${String(tx.chainId)}`);
+      }
       const approved = await requestApproval({ kind: 'transaction', tx, origin: currentOrigin() });
       if (!approved) throw new RpcError(ERR_USER_REJECTED, 'User rejected the transaction.');
-      const wallet = requireUnlockedEvm().connect(providerFor(currentChainId));
+      const wallet = requireUnlockedEvm().connect(providerFor(requestedChainId));
       try {
-        const sent = await wallet.sendTransaction(tx as Record<string, unknown>);
+        const { chainId: _ignoredChainId, ...txForProvider } = tx;
+        const sent = await wallet.sendTransaction(txForProvider as Record<string, unknown>);
         return sent.hash;
       } catch (e) {
         // Surface the RPC's own reason (insufficient funds, nonce too low,
@@ -195,16 +280,25 @@ export async function handleEthProviderRequest(method: string, params: unknown):
     }
 
     case 'wallet_sendCalls': {
+      // EIP-5792 passes a single request object inside the params array.
       // A real EOA can't batch atomically. Being honest about that (per the
       // writeup this fork is competing with) is right, but silently
       // executing calls sequentially without saying so in the approval UI
       // is not — the approval prompt for this method must say "N separate
       // transactions" so the user isn't surprised by partial execution.
-      const { calls } = params as { calls: Array<Record<string, unknown>> };
+      const [request] = params as [{ calls: Array<Record<string, unknown>>; chainId?: string }];
+      const calls = request?.calls;
+      if (!Array.isArray(calls) || calls.length === 0) {
+        throw new RpcError(ERR_INVALID_PARAMS, 'wallet_sendCalls requires a non-empty calls array.');
+      }
+      const requestedChainId = request.chainId ? parseInt(request.chainId, 16) : currentChainId;
+      if (!getChainConfig(requestedChainId)) {
+        throw new RpcError(4902, `Unrecognized chain ${request.chainId}`);
+      }
       const approved = await requestApproval({ kind: 'batch-transaction', calls, origin: currentOrigin() });
       if (!approved) throw new RpcError(ERR_USER_REJECTED, 'User rejected the batch.');
 
-      const wallet = requireUnlockedEvm().connect(providerFor(currentChainId));
+      const wallet = requireUnlockedEvm().connect(providerFor(requestedChainId));
       const batchId = crypto.randomUUID();
       const receipts: unknown[] = [];
       batchStatus.set(batchId, { status: 'PENDING', receipts });
@@ -229,7 +323,7 @@ export async function handleEthProviderRequest(method: string, params: unknown):
     }
 
     case 'wallet_getCallsStatus': {
-      const { id } = params as { id: string };
+      const [{ id }] = params as [{ id: string }];
       const entry = batchStatus.get(id);
       if (!entry) throw new RpcError(ERR_INVALID_PARAMS, `Unknown batch id ${id}`);
       return entry;

@@ -1,12 +1,13 @@
 import { connectToParent, WalletBridge } from './bridge/handshake';
-import { handleEthProviderRequest, setOriginGetter as setEthOriginGetter, setEventEmitter as setEthEventEmitter, getDisplayBalance, getCurrentChainName, broadcastPreparedTransaction, getErc20Allowance, buildErc20ApproveCalldata } from './providers/ethProvider';
-import { handleSolanaProviderRequest, setOriginGetter as setSolOriginGetter, setSolanaCluster, getDisplaySolBalance, getSolanaClusterName, getSolanaConnection, signAndBroadcastSerializedTransaction } from './providers/solanaProvider';
+import { handleEthProviderRequest, setOriginGetter as setEthOriginGetter, setEventEmitter as setEthEventEmitter, getDisplayBalance, getCurrentChainName, getCurrentChainNativeSymbol, sendEvmToken, broadcastPreparedTransaction, getErc20Allowance, buildErc20ApproveCalldata } from './providers/ethProvider';
+import { handleSolanaProviderRequest, setOriginGetter as setSolOriginGetter, setSolanaCluster, getDisplaySolBalance, getSolanaClusterName, getSolanaConnection, signAndBroadcastSerializedTransaction, sendSolanaNative } from './providers/solanaProvider';
 import { hasStoredAccount, isUnlocked, getEvmAddress, getSolanaAddress, requireUnlockedEvm } from './keys/keyManager';
 import { getEvmSwapQuote, formatTokenAmount, NATIVE_TOKEN_ADDRESS } from './swap/lifi';
 import { getSolanaSwapQuote, getSolanaSwapTransaction, getMintDecimals, formatSplAmount } from './swap/jupiter';
 import { buildSiwfMessage } from './auth/siwf';
 import { buildJfs } from './auth/jfs';
 import { requestApproval } from './ui/approval';
+import { getChainConfig } from './providers/chains';
 
 // Dev-only override, never present on a real embedding: the harness
 // appends ?cluster=devnet so its own Solana send-transaction test doesn't
@@ -84,9 +85,7 @@ async function main() {
         // Open the wallet UI with the send screen prefilled from sendIntent
         // (chain, contract address, amount, recipient). The person still has
         // to press send — this call only stages the screen.
-        renderSendScreen(sendIntent);
-        // Result is reported asynchronously via bridge.warpcast.request('send_token_result', { result })
-        // once the person confirms or cancels in the UI — not returned here.
+        runSendFlow(sendIntent, bridge, getConnectionOrigin);
         return undefined;
       }
       case 'swap_token': {
@@ -151,6 +150,7 @@ function renderHome() {
   const solAddress = getSolanaAddress();
   const solCluster = getSolanaClusterName();
 
+  const nativeSymbol = getCurrentChainNativeSymbol();
   const render = (evmBalance: string, solBalance: string) =>
     `Unlocked.\n\nEVM — ${chainName}\nAddress: ${evmAddress}\nBalance: ${evmBalance}\n\nSolana — ${solCluster}\nAddress: ${solAddress}\nBalance: ${solBalance}`;
 
@@ -162,7 +162,7 @@ function renderHome() {
   let evmBalance = 'loading…';
   let solBalance = 'loading…';
   getDisplayBalance()
-    .then((b) => (evmBalance = `${b} ETH`))
+    .then((b) => (evmBalance = `${b} ${nativeSymbol}`))
     .catch((e) => (evmBalance = `failed (${e instanceof Error ? e.message : String(e)})`))
     .finally(() => (root.textContent = render(evmBalance, solBalance)));
   getDisplaySolBalance()
@@ -174,8 +174,52 @@ function renderStandalone() {
   const root = document.getElementById('app')!;
   root.textContent = 'Opened outside a parent frame. Standalone/demo UI not yet built.';
 }
-function renderSendScreen(intent: unknown) {
-  console.log('TODO renderSendScreen', intent);
+async function runSendFlow(
+  rawIntent: Record<string, unknown> | undefined,
+  bridge: WalletBridge,
+  getOrigin: () => string,
+) {
+  try {
+    if (!isUnlocked()) {
+      const unlocked = await requestApproval({ kind: 'unlock' });
+      if (!unlocked) {
+        await bridge.warpcast.request('send_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+        return;
+      }
+      renderHome();
+    }
+    if (!rawIntent) throw new Error('send_token called with no sendIntent.');
+
+    const recipient = String(rawIntent.recipient ?? rawIntent.to ?? rawIntent.address ?? '');
+    const amount = String(rawIntent.amount ?? rawIntent.sendAmount ?? rawIntent.value ?? '');
+    const token = rawIntent.tokenAddress ?? rawIntent.token ?? rawIntent.contractAddress;
+    const chainId = Number(rawIntent.chainId ?? rawIntent.networkId ?? rawIntent.sellChainId ?? 0);
+    const network = String(rawIntent.network ?? rawIntent.chain ?? '').toLowerCase();
+    const isSolana = network.includes('solana') || network === 'svm' || rawIntent.chain === 'solana';
+    const amountIsRaw = rawIntent.amountIsRaw === true || rawIntent.rawAmount === true;
+    if (!recipient || !amount) throw new Error(`sendIntent shape not recognized — got keys [${Object.keys(rawIntent).join(', ')}].`);
+    if (!isSolana && chainId && !getChainConfig(chainId)) throw new Error(`Unsupported EVM chain ${chainId}.`);
+
+    const approved = await requestApproval({
+      kind: 'transaction',
+      tx: { to: recipient, amount, token, chainId: chainId || undefined, network: isSolana ? 'solana' : undefined },
+      origin: getOrigin(),
+    });
+    if (!approved) {
+      await bridge.warpcast.request('send_token_result', { success: false, reason: 'rejected' }).catch(() => {});
+      return;
+    }
+
+    const txHash = isSolana
+      ? await sendSolanaNative(recipient, amount, amountIsRaw)
+      : await sendEvmToken({ to: recipient, token: token ? String(token) : undefined, amount, amountIsRaw, chainId: chainId || undefined });
+    await bridge.warpcast.request('send_token_result', { success: true, txHash }).catch(() => {});
+    renderHome();
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error('Send failed:', message);
+    await bridge.warpcast.request('send_token_result', { success: false, reason: 'error', error: message }).catch(() => {});
+  }
 }
 
 /**

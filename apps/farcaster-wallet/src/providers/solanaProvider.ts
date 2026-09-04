@@ -1,6 +1,6 @@
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
-import { ERR_USER_REJECTED, ERR_INTERNAL, RpcError } from '../bridge/rpc';
+import { ERR_USER_REJECTED, ERR_INTERNAL, ERR_INVALID_PARAMS, RpcError } from '../bridge/rpc';
 import { requireUnlockedSolana, isUnlocked } from '../keys/keyManager';
 import { requestApproval } from '../ui/approval';
 
@@ -105,6 +105,37 @@ export async function getDisplaySolBalance(): Promise<string> {
 
 export function getSolanaClusterName(): string {
   return cluster;
+}
+
+/** Native SOL transfer used by the Farcaster wallet-level send flow. The
+ * transaction is constructed locally, shown to the user for approval by the
+ * caller, then signed and confirmed here. */
+
+function parseSolAmountToLamports(amount: string): bigint {
+  const value = amount.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(value)) throw new RpcError(ERR_INVALID_PARAMS, 'Invalid SOL amount.');
+  const [whole, fraction = ''] = value.split('.');
+  if (fraction.length > 9) throw new RpcError(ERR_INVALID_PARAMS, 'SOL amount has more than 9 decimal places.');
+  return BigInt(whole) * 1_000_000_000n + BigInt((fraction + '000000000').slice(0, 9));
+}
+
+export async function sendSolanaNative(to: string, amount: string, amountIsRaw = false): Promise<string> {
+  const { PublicKey, SystemProgram, Transaction } = await import('@solana/web3.js');
+  const { publicKey, secretKey } = requireUnlockedSolana();
+  const from = new PublicKey(publicKey);
+  const destination = new PublicKey(to);
+  const lamports = amountIsRaw ? BigInt(amount) : parseSolAmountToLamports(amount);
+  if (lamports <= 0n) throw new RpcError(ERR_INVALID_PARAMS, 'SOL amount must be greater than zero.');
+  if (lamports > BigInt(Number.MAX_SAFE_INTEGER)) throw new RpcError(ERR_INVALID_PARAMS, 'SOL amount is too large.');
+  const connection = await getSolanaConnection();
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  const tx = new Transaction({ recentBlockhash: blockhash, feePayer: from });
+  tx.add(SystemProgram.transfer({ fromPubkey: from, toPubkey: destination, lamports: Number(lamports) }));
+  const { Keypair } = await import('@solana/web3.js');
+  tx.sign(Keypair.fromSecretKey(secretKey));
+  const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+  return signature;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
